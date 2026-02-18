@@ -23,7 +23,6 @@ DESTINATIONS = ["LIS","OPO"]
 
 DEPARTURE_START = datetime.date(2026,7,27)
 DEPARTURE_END = datetime.date(2026,7,31)
-
 RETURN_DAYS = 7
 
 AIRLINES_ALLOWED = [
@@ -62,11 +61,7 @@ def miles_value_check(price,dest):
 
 # ---------------- DEAL SCORING ----------------
 def deal_score(price,total_minutes,value_per_mile):
-    return (
-        price/1000 +
-        total_minutes/10 -
-        value_per_mile*50
-    )
+    return price/1000 + total_minutes/10 - value_per_mile*50
 
 # ---------------- AIRLINE LINKS ----------------
 def airline_link(airline,origin,dest,date):
@@ -85,19 +80,66 @@ def airline_link(airline,origin,dest,date):
     if "KLM" in airline:
         return f"https://www.klm.co.in/search?origin={origin}&destination={dest}&date={date}"
 
-    return "Search on airline website"
+    return "Search airline website"
 
 # ---------------- WHATSAPP ----------------
 def send_whatsapp(msg):
     if not TWILIO_SID:
         return
 
-    url=f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
-
     requests.post(
-        url,
+        f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json",
         auth=(TWILIO_SID,TWILIO_TOKEN),
         data={"From":TWILIO_FROM,"To":TWILIO_TO,"Body":msg}
+    )
+
+# ---------------- EMAIL ----------------
+def send_email(results):
+
+    if not results:
+        print("No deals to send")
+        return
+
+    body="\n\n".join(results)
+
+    requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization":f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type":"application/json"
+        },
+        json={
+            "personalizations":[{"to":[{"email":ALERT_EMAIL}]}],
+            "from":{"email":ALERT_EMAIL},
+            "subject":"🏆 TOP 5 Flight Deals",
+            "content":[{"type":"text/plain","value":body}]
+        }
+    )
+
+def send_error_email(error_msg):
+
+    body=f"""
+⚠️ Flight Bot Error
+
+Error:
+{error_msg}
+
+Time:
+{datetime.datetime.now()}
+"""
+
+    requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization":f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type":"application/json"
+        },
+        json={
+            "personalizations":[{"to":[{"email":ALERT_EMAIL}]}],
+            "from":{"email":ALERT_EMAIL},
+            "subject":"⚠️ BOT ERROR ALERT",
+            "content":[{"type":"text/plain","value":body}]
+        }
     )
 
 # ---------------- SEARCH ----------------
@@ -116,10 +158,8 @@ def search_flights(depart_date,return_date,dest):
         "travel_class":2
     }
 
-    data=requests.get(
-        "https://serpapi.com/search.json",
-        params=params
-    ).json()
+    r=requests.get("https://serpapi.com/search.json",params=params,timeout=30)
+    data=r.json()
 
     found=[]
 
@@ -129,49 +169,41 @@ def search_flights(depart_date,return_date,dest):
         if price>MAX_BUDGET:
             continue
 
-        outbound=f.get("outbound_flights",[])
-        inbound=f.get("return_flights",[])
-
-        if not outbound or not inbound:
+        out=f.get("outbound_flights",[])
+        inc=f.get("return_flights",[])
+        if not out or not inc:
             continue
 
-        airline=outbound[0].get("airline","")
+        if len(out)-1>1 or len(inc)-1>1:
+            continue
+
+        airline=out[0]["airline"]
         if not any(a in airline for a in AIRLINES_ALLOWED):
             continue
 
-        if len(outbound)-1>1 or len(inbound)-1>1:
-            continue
-
-        # ----- durations -----
         def leg_minutes(legs):
             return sum(x["duration"] for x in legs)
 
-        out_total=leg_minutes(outbound)
-        in_total=leg_minutes(inbound)
+        out_total=leg_minutes(out)
+        in_total=leg_minutes(inc)
         roundtrip_total=out_total+in_total
 
         def fmt(m):
             return f"{m//60}h {m%60}m"
 
-        # ----- paths -----
         def build_path(legs):
-            lines=[]
-            for leg in legs:
-                dep=leg["departure_airport"]["id"]
-                arr=leg["arrival_airport"]["id"]
-                dt=leg["departure_airport"]["time"]
-                at=leg["arrival_airport"]["time"]
-                lines.append(f"{dep} {dt} → {arr} {at}")
-            return "\n".join(lines)
+            return "\n".join(
+                f"{l['departure_airport']['id']} {l['departure_airport']['time']} → "
+                f"{l['arrival_airport']['id']} {l['arrival_airport']['time']}"
+                for l in legs
+            )
 
-        out_path=build_path(outbound)
-        in_path=build_path(inbound)
+        out_path=build_path(out)
+        in_path=build_path(inc)
 
-        # ----- layovers -----
-        out_lay=outbound[0]["arrival_airport"]["id"] if len(outbound)>1 else "Direct"
-        in_lay=inbound[0]["arrival_airport"]["id"] if len(inbound)>1 else "Direct"
+        out_lay=out[0]["arrival_airport"]["id"] if len(out)>1 else "Direct"
+        in_lay=inc[0]["arrival_airport"]["id"] if len(inc)>1 else "Direct"
 
-        # ----- price drop -----
         key=f"{dest}_{depart_date}"
         drop=""
         if key in cache and price<cache[key]:
@@ -179,105 +211,82 @@ def search_flights(depart_date,return_date,dest):
         cache[key]=price
         save_cache(cache)
 
-        # ----- miles value -----
-        miles_label,value_per_mile=miles_value_check(price,dest)
+        miles_label,val=miles_value_check(price,dest)
 
-        # ----- advice -----
         if price<=SNIPER_PRICE:
             advice="🚨 ULTRA SNIPER — BOOK NOW"
-            send_whatsapp(f"🚨 SNIPER ₹{price} to {dest}! BOOK NOW!")
+            send_whatsapp(f"🚨 SNIPER ₹{price} to {dest}!")
         elif price<=160000:
             advice="✅ Good cash fare"
         else:
             advice="✈️ Consider miles"
 
         link=airline_link(airline,"DEL",dest,depart_date)
-
-        score=deal_score(price,roundtrip_total,value_per_mile)
+        score=deal_score(price,roundtrip_total,val)
 
         text=f"""
-💺 BUSINESS CLASS ROUNDTRIP
+💺 BUSINESS CLASS
 
 ₹{price} {drop}
 {advice}
 
 Airline: {airline}
-TOTAL TIME: {fmt(roundtrip_total)}
+Total: {fmt(roundtrip_total)}
 
-────────────
-OUTBOUND
-Duration: {fmt(out_total)}
-Layover: {out_lay}
+OUTBOUND ({fmt(out_total)} | {out_lay})
 {out_path}
 
-────────────
-RETURN
-Duration: {fmt(in_total)}
-Layover: {in_lay}
+RETURN ({fmt(in_total)} | {in_lay})
 {in_path}
 
-MILES VALUE:
+MILES:
 {miles_label}
 
-🎯 BOOK HERE:
+BOOK:
 {link}
 """
 
-        found.append({
-            "score":score,
-            "text":text
-        })
+        found.append({"score":score,"text":text})
 
     return found
 
-# ---------------- SCAN & RANK ----------------
+# ---------------- SCAN ----------------
 def scan_all():
-
     ranked=[]
-
     d=DEPARTURE_START
+
     while d<=DEPARTURE_END:
         r=d+datetime.timedelta(days=RETURN_DAYS)
-
         for dest in DESTINATIONS:
             ranked+=search_flights(d,r,dest)
-
         d+=datetime.timedelta(days=1)
 
     ranked.sort(key=lambda x:x["score"])
+    return [x["text"] for x in ranked[:5]]
 
-    top5=ranked[:5]
-
-    return [x["text"] for x in top5]
-
-# ---------------- EMAIL ----------------
-def send_email(results):
-
-    if not results:
-        print("No deals")
-        return
-
-    body="\n\n".join(results)
-
-    requests.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={
-            "Authorization":f"Bearer {SENDGRID_API_KEY}",
-            "Content-Type":"application/json"
-        },
-        json={
-            "personalizations":[{"to":[{"email":ALERT_EMAIL}]}],
-            "from":{"email":ALERT_EMAIL},
-            "subject":"🏆 TOP 5 Portugal Business Class Deals",
-            "content":[{"type":"text/plain","value":body}]
-        }
-    )
-
-# ---------------- LOOP ----------------
+# ---------------- MAIN LOOP ----------------
 if __name__=="__main__":
+
     while True:
-        print("Scanning...")
-        deals=scan_all()
-        send_email(deals)
-        print("Sleeping 8h")
+
+        try:
+            print("=== SCAN START ===")
+
+            try:
+                deals=scan_all()
+            except Exception as e:
+                print("Retrying scan...")
+                time.sleep(10)
+                deals=scan_all()
+
+            print(f"Deals found: {len(deals)}")
+
+            send_email(deals)
+            print("Email sent")
+
+        except Exception as e:
+            print("ERROR:",e)
+            send_error_email(str(e))
+
+        print("Sleeping 8h...")
         time.sleep(28800)
