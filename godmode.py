@@ -1,111 +1,146 @@
 import requests
-import pandas as pd
-import datetime
-import smtplib
-import ssl
 import os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import datetime
+import time
 from dotenv import load_dotenv
 
-load_dotenv("config.env")
+load_dotenv()
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
-def search_flights(depart_date, return_date, destination):
+MAX_BUDGET = 200000  # 2L INR max
+DESTINATIONS = ["LIS", "OPO"]  # Lisbon + Porto
+
+DEPARTURE_START = datetime.date(2026, 7, 27)
+DEPARTURE_END = datetime.date(2026, 7, 31)
+
+RETURN_DAYS = 7  # trip duration
+AIRLINES_ALLOWED = ["Qatar", "Emirates", "Etihad", "Lufthansa", "Air France", "KLM"]
+
+
+# ---------------------------------------------------
+# SEARCH FLIGHTS
+# ---------------------------------------------------
+def search_flights(depart_date, return_date, dest):
+    print(f"Checking {dest} | Depart {depart_date}")
+
     url = "https://serpapi.com/search.json"
 
     params = {
         "engine": "google_flights",
         "departure_id": "DEL",
-        "arrival_id": destination,
-        "outbound_date": depart_date,
-        "return_date": return_date,
+        "arrival_id": dest,
+        "outbound_date": depart_date.strftime("%Y-%m-%d"),
+        "return_date": return_date.strftime("%Y-%m-%d"),
         "currency": "INR",
         "hl": "en",
-        "travel_class": "2",
-        "deep_search": "true",
-        "api_key": SERPAPI_KEY
+        "api_key": SERPAPI_KEY,
+        "travel_class": 2,
+        "deep_search": True
     }
 
     try:
-        r = requests.get(url, params=params, verify=False, timeout=60)
+        r = requests.get(url, params=params, timeout=60)
         data = r.json()
-
-        flights = []
-        if "best_flights" in data:
-            for f in data["best_flights"]:
-                price = f.get("price", 999999)
-                airline = f["flights"][0]["airline"]
-                flights.append({
-                    "price": price,
-                    "airline": airline,
-                    "route": destination,
-                    "depart": depart_date,
-                    "return": return_date
-                })
-
-        return flights
-
     except Exception as e:
         print("API error:", e)
         return []
 
-def send_email(deals):
-    if not deals:
-        print("No cheap deals today")
-        return
+    results = []
 
-    body = ""
-    for d in deals:
-        body += f"""
-Route: Delhi → {d['route']}
-Airline: {d['airline']}
-Price: ₹{d['price']}
-Depart: {d['depart']}
-Return: {d['return']}
--------------------------
+    if "best_flights" not in data:
+        return []
+
+    for flight in data["best_flights"]:
+        price = flight.get("price", 999999)
+
+        if price > MAX_BUDGET:
+            continue
+
+        airline_ok = False
+        for f in flight.get("flights", []):
+            airline = f.get("airline", "")
+            if any(a.lower() in airline.lower() for a in AIRLINES_ALLOWED):
+                airline_ok = True
+
+        if not airline_ok:
+            continue
+
+        stops = len(flight.get("flights", [])) - 1
+        if stops > 1:
+            continue
+
+        results.append(
+            f"""
+PRICE: ₹{price}
+ROUTE: DEL → {dest}
+DEPART: {depart_date}
+RETURN: {return_date}
+AIRLINE: {flight['flights'][0]['airline']}
+BOOK: {flight.get('link','N/A')}
 """
+        )
 
-    msg = MIMEMultipart()
-    msg["Subject"] = "🔥 Portugal Flight Deals Found"
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_RECEIVER
-    msg.attach(MIMEText(body, "plain"))
+    return results
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASS)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
-    print("Email sent!")
-
+# ---------------------------------------------------
+# SCAN ALL DATES
+# ---------------------------------------------------
 def scan_all():
     print("Starting GOD MODE scan...")
 
-    base_depart = datetime.date(2026, 7, 25)
     deals = []
 
-    for i in range(6):
-        depart = base_depart + datetime.timedelta(days=i)
-        ret = depart + datetime.timedelta(days=7)
+    d = DEPARTURE_START
+    while d <= DEPARTURE_END:
+        ret = d + datetime.timedelta(days=RETURN_DAYS)
 
-        depart_str = depart.strftime("%Y-%m-%d")
-        ret_str = ret.strftime("%Y-%m-%d")
+        for dest in DESTINATIONS:
+            res = search_flights(d, ret, dest)
+            deals.extend(res)
 
-        for dest in ["LIS", "OPO"]:
-            print(f"Checking {dest} | Depart {depart_str}")
-            flights = search_flights(depart_str, ret_str, dest)
-
-            for f in flights:
-                if f["price"] < 200000:
-                    deals.append(f)
+        d += datetime.timedelta(days=1)
+        time.sleep(2)
 
     return deals
 
+
+# ---------------------------------------------------
+# SEND EMAIL VIA SENDGRID
+# ---------------------------------------------------
+def send_email(results):
+    if not results:
+        print("No cheap flights today")
+        return
+
+    body = "\n\n".join(results)
+
+    data = {
+        "personalizations": [{"to": [{"email": ALERT_EMAIL}]}],
+        "from": {"email": ALERT_EMAIL},
+        "subject": "🔥 GOD MODE: Portugal Business Class Deals Found",
+        "content": [{"type": "text/plain", "value": body}]
+    }
+
+    r = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=data,
+        timeout=30
+    )
+
+    print("SendGrid response:", r.status_code, r.text)
+
+
+# ---------------------------------------------------
+# RUN BOT
+# ---------------------------------------------------
 if __name__ == "__main__":
     results = scan_all()
     send_email(results)
