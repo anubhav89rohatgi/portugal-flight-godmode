@@ -19,8 +19,8 @@ TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 TWILIO_FROM = os.getenv("TWILIO_FROM")
 TWILIO_TO = os.getenv("TWILIO_TO")
 
-MAX_BUDGET = 200000
-SNIPER_PRICE = 100000
+MAX_BUDGET = 300000
+SNIPER_PRICE = 150000
 
 DESTINATIONS = ["LIS","OPO"]
 
@@ -273,3 +273,4 @@ if __name__=="__main__":
 
             print("Sleeping 8h...")
             time.sleep(28800)
+
