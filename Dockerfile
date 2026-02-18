@@ -9,13 +9,14 @@ WORKDIR /app
 COPY . .
 
 # Install dependencies
-RUN pip install --no-cache-dir requests python-dotenv
+RUN pip install --no-cache-dir requests python-dotenv streamlit
 
 # Debug: show files in container
 RUN ls -la
 
 # Run script
 CMD ["python","godmode.py"]
+
 
 
 
