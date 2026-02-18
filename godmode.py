@@ -1,10 +1,12 @@
-print("=== BOT FILE STARTED ===")
 import requests
 import os
 import datetime
 import time
 import json
+import sys
 from dotenv import load_dotenv
+
+print("=== BOT FILE STARTED ===")
 
 load_dotenv()
 
@@ -22,8 +24,10 @@ SNIPER_PRICE = 100000
 
 DESTINATIONS = ["LIS","OPO"]
 
-DEPARTURE_START = datetime.date(2026,7,27)
-DEPARTURE_END = datetime.date(2026,7,31)
+# ---- Use nearer dates so data exists ----
+DEPARTURE_START = datetime.date.today() + datetime.timedelta(days=30)
+DEPARTURE_END   = datetime.date.today() + datetime.timedelta(days=35)
+
 RETURN_DAYS = 7
 
 AIRLINES_ALLOWED = [
@@ -60,9 +64,9 @@ def miles_value_check(price,dest):
 
     return label,value
 
-# ---------------- DEAL SCORING ----------------
-def deal_score(price,total_minutes,value_per_mile):
-    return price/1000 + total_minutes/10 - value_per_mile*50
+# ---------------- DEAL SCORE ----------------
+def deal_score(price,total_minutes,value):
+    return price/1000 + total_minutes/10 - value*50
 
 # ---------------- AIRLINE LINKS ----------------
 def airline_link(airline,origin,dest,date):
@@ -98,10 +102,11 @@ def send_whatsapp(msg):
 def send_email(results):
 
     if not results:
-        print("No deals to send")
-        return
-
-    body="\n\n".join(results)
+        subject="Flight Bot Update (No Deals)"
+        body="No good deals found.\nBot running fine ✅"
+    else:
+        subject="🏆 TOP 5 Flight Deals"
+        body="\n\n".join(results)
 
     requests.post(
         "https://api.sendgrid.com/v3/mail/send",
@@ -112,21 +117,22 @@ def send_email(results):
         json={
             "personalizations":[{"to":[{"email":ALERT_EMAIL}]}],
             "from":{"email":ALERT_EMAIL},
-            "subject":"🏆 TOP 5 Flight Deals",
+            "subject":subject,
             "content":[{"type":"text/plain","value":body}]
         }
     )
 
-def send_error_email(error_msg):
+    print("Email sent")
+
+# ---------------- ERROR EMAIL ----------------
+def send_error_email(err):
 
     body=f"""
-⚠️ Flight Bot Error
+⚠️ BOT ERROR
 
-Error:
-{error_msg}
+{err}
 
-Time:
-{datetime.datetime.now()}
+Time: {datetime.datetime.now()}
 """
 
     requests.post(
@@ -144,7 +150,7 @@ Time:
     )
 
 # ---------------- SEARCH ----------------
-def search_flights(depart_date,return_date,dest):
+def search_flights(depart,ret,dest):
 
     cache=load_cache()
 
@@ -152,14 +158,19 @@ def search_flights(depart_date,return_date,dest):
         "engine":"google_flights",
         "departure_id":"DEL",
         "arrival_id":dest,
-        "outbound_date":str(depart_date),
-        "return_date":str(return_date),
+        "outbound_date":str(depart),
+        "return_date":str(ret),
         "currency":"INR",
         "api_key":SERPAPI_KEY,
         "travel_class":2
     }
 
-    r=requests.get("https://serpapi.com/search.json",params=params,timeout=30)
+    r=requests.get(
+        "https://serpapi.com/search.json",
+        params=params,
+        timeout=30
+    )
+
     data=r.json()
 
     found=[]
@@ -175,75 +186,34 @@ def search_flights(depart_date,return_date,dest):
         if not out or not inc:
             continue
 
-        if len(out)-1>1 or len(inc)-1>1:
-            continue
-
         airline=out[0]["airline"]
         if not any(a in airline for a in AIRLINES_ALLOWED):
             continue
 
-        def leg_minutes(legs):
-            return sum(x["duration"] for x in legs)
+        def mins(x): return sum(l["duration"] for l in x)
 
-        out_total=leg_minutes(out)
-        in_total=leg_minutes(inc)
-        roundtrip_total=out_total+in_total
-
-        def fmt(m):
-            return f"{m//60}h {m%60}m"
-
-        def build_path(legs):
-            return "\n".join(
-                f"{l['departure_airport']['id']} {l['departure_airport']['time']} → "
-                f"{l['arrival_airport']['id']} {l['arrival_airport']['time']}"
-                for l in legs
-            )
-
-        out_path=build_path(out)
-        in_path=build_path(inc)
-
-        out_lay=out[0]["arrival_airport"]["id"] if len(out)>1 else "Direct"
-        in_lay=inc[0]["arrival_airport"]["id"] if len(inc)>1 else "Direct"
-
-        key=f"{dest}_{depart_date}"
-        drop=""
-        if key in cache and price<cache[key]:
-            drop=f"📉 Drop ₹{cache[key]-price}"
-        cache[key]=price
-        save_cache(cache)
+        out_m=mins(out)
+        in_m=mins(inc)
+        total=out_m+in_m
 
         miles_label,val=miles_value_check(price,dest)
 
         if price<=SNIPER_PRICE:
-            advice="🚨 ULTRA SNIPER — BOOK NOW"
             send_whatsapp(f"🚨 SNIPER ₹{price} to {dest}!")
-        elif price<=160000:
-            advice="✅ Good cash fare"
-        else:
-            advice="✈️ Consider miles"
 
-        link=airline_link(airline,"DEL",dest,depart_date)
-        score=deal_score(price,roundtrip_total,val)
+        link=airline_link(airline,"DEL",dest,depart)
+
+        score=deal_score(price,total,val)
 
         text=f"""
-💺 BUSINESS CLASS
-
-₹{price} {drop}
-{advice}
-
+₹{price}
 Airline: {airline}
-Total: {fmt(roundtrip_total)}
+Total Time: {total//60}h {total%60}m
 
-OUTBOUND ({fmt(out_total)} | {out_lay})
-{out_path}
-
-RETURN ({fmt(in_total)} | {in_lay})
-{in_path}
-
-MILES:
+Miles Value:
 {miles_label}
 
-BOOK:
+Book:
 {link}
 """
 
@@ -253,42 +223,53 @@ BOOK:
 
 # ---------------- SCAN ----------------
 def scan_all():
+
     ranked=[]
     d=DEPARTURE_START
 
+    print("=== SCAN START ===")
+
     while d<=DEPARTURE_END:
         r=d+datetime.timedelta(days=RETURN_DAYS)
+
         for dest in DESTINATIONS:
+            print(f"Checking {dest} | {d}")
             ranked+=search_flights(d,r,dest)
+
         d+=datetime.timedelta(days=1)
 
     ranked.sort(key=lambda x:x["score"])
-    return [x["text"] for x in ranked[:5]]
 
-# ---------------- MAIN LOOP ----------------
+    results=[x["text"] for x in ranked[:5]]
+
+    print(f"Deals found: {len(results)}")
+
+    return results
+
+# ---------------- MAIN ----------------
 if __name__=="__main__":
 
-    while True:
+    if "runonce" in sys.argv:
+
+        print("=== AD-HOC RUN ===")
 
         try:
-            print("=== SCAN START ===")
-
-            try:
-                deals=scan_all()
-            except Exception as e:
-                print("Retrying scan...")
-                time.sleep(10)
-                deals=scan_all()
-
-            print(f"Deals found: {len(deals)}")
-
+            deals=scan_all()
             send_email(deals)
-            print("Email sent")
 
         except Exception as e:
             print("ERROR:",e)
             send_error_email(str(e))
 
-        print("Sleeping 8h...")
-        time.sleep(28800)
+    else:
+        while True:
 
+            try:
+                deals=scan_all()
+                send_email(deals)
+
+            except Exception as e:
+                send_error_email(str(e))
+
+            print("Sleeping 8h...")
+            time.sleep(28800)
