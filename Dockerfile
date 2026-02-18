@@ -15,5 +15,6 @@ RUN pip install --no-cache-dir requests python-dotenv
 RUN ls -la
 
 # Run script
-CMD ["python","godmode.py"]
+CMD ["python","godmode.py","runonce"]
+
 
