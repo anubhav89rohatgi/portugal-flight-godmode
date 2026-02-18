@@ -1,3 +1,4 @@
+print("=== BOT FILE STARTED ===")
 import requests
 import os
 import datetime
@@ -290,3 +291,4 @@ if __name__=="__main__":
 
         print("Sleeping 8h...")
         time.sleep(28800)
+
