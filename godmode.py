@@ -138,9 +138,12 @@ def send_email(results):
     print("SendGrid response:", r.status_code, r.text)
 
 
-# ---------------------------------------------------
-# RUN BOT
-# ---------------------------------------------------
+# RUN FOREVER (daily automation)
 if __name__ == "__main__":
-    results = scan_all()
-    send_email(results)
+    while True:
+        print("Running daily scan...")
+        results = scan_all()
+        send_email(results)
+
+        print("Sleeping 12 hours...")
+        time.sleep(43200)  # 12 hrs
