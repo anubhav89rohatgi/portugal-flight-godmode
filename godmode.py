@@ -10,7 +10,9 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
-MAX_BUDGET = 200000  # 2L INR
+MAX_BUDGET = 200000
+SNIPER_PRICE = 140000
+
 DESTINATIONS = ["LIS", "OPO"]
 
 DEPARTURE_START = datetime.date(2026, 7, 27)
@@ -28,13 +30,19 @@ AIRLINES_ALLOWED = [
 ]
 
 # ---------------------------------------------------
-# MILES DECISION ENGINE
+# MILES + BONUS INTELLIGENCE
 # ---------------------------------------------------
 def miles_advice(price):
-    if price <= 160000:
+
+    if price <= SNIPER_PRICE:
+        return "🚨 MISTAKE FARE — BOOK NOW"
+
+    elif price <= 160000:
         return "✅ PAY CASH (great deal)"
+
     elif price >= 220000:
-        return "✈️ USE AMEX MILES"
+        return "✈️ USE AMEX MILES\n💳 Check AMEX → Qatar / FlyingBlue transfer bonuses"
+
     else:
         return "🤔 CASH vs MILES — compare"
 
@@ -79,7 +87,6 @@ def search_flights(depart_date, return_date, dest):
         if price > MAX_BUDGET:
             continue
 
-        # Airline filter
         airline_ok = False
         for f in flight.get("flights", []):
             airline = f.get("airline", "")
@@ -89,7 +96,6 @@ def search_flights(depart_date, return_date, dest):
         if not airline_ok:
             continue
 
-        # Stop filter
         stops = len(flight.get("flights", [])) - 1
         if stops > 1:
             continue
@@ -103,7 +109,7 @@ ROUTE: DEL → {dest}
 DEPART: {depart_date}
 RETURN: {return_date}
 AIRLINE: {flight['flights'][0]['airline']}
-BOOKING LINK: {flight.get('link','N/A')}
+BOOK: {flight.get('link','N/A')}
 """)
 
     return deals
@@ -135,7 +141,7 @@ def scan_all():
 
 
 # ---------------------------------------------------
-# SEND EMAIL (SENDGRID)
+# SEND EMAIL
 # ---------------------------------------------------
 def send_email(results):
 
@@ -148,7 +154,7 @@ def send_email(results):
     data = {
         "personalizations": [{"to": [{"email": ALERT_EMAIL}]}],
         "from": {"email": ALERT_EMAIL},
-        "subject": "🔥 Portugal Business Class Deals (GOD MODE)",
+        "subject": "🔥 GOD MODE: Portugal Flight Sniper Alert",
         "content": [{"type": "text/plain", "value": body}]
     }
 
@@ -165,7 +171,7 @@ def send_email(results):
 
 
 # ---------------------------------------------------
-# RUN FOREVER (EVERY 6 HOURS)
+# RUN EVERY 8 HOURS
 # ---------------------------------------------------
 if __name__ == "__main__":
 
