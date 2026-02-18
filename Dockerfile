@@ -10,4 +10,5 @@ RUN pip install --no-cache-dir requests python-dotenv streamlit
 
 RUN ls -la
 
-CMD streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0
+CMD ["python","godmode.py"]
+
