@@ -19,10 +19,10 @@ TWILIO_TO = os.getenv("TWILIO_TO")
 MAX_BUDGET = 200000
 SNIPER_PRICE = 100000
 
-DESTINATIONS = ["LIS", "OPO"]
+DESTINATIONS = ["LIS","OPO"]
 
-DEPARTURE_START = datetime.date(2026, 7, 27)
-DEPARTURE_END = datetime.date(2026, 7, 31)
+DEPARTURE_START = datetime.date(2026,7,27)
+DEPARTURE_END = datetime.date(2026,7,31)
 
 RETURN_DAYS = 7
 
@@ -31,7 +31,7 @@ AIRLINES_ALLOWED = [
     "Lufthansa","Air France","KLM"
 ]
 
-CACHE_FILE = "price_cache.json"
+CACHE_FILE="price_cache.json"
 
 # ---------------- CACHE ----------------
 def load_cache():
@@ -42,173 +42,242 @@ def load_cache():
 def save_cache(c):
     json.dump(c, open(CACHE_FILE,"w"))
 
-# ---------------- AMEX BONUS HINT ----------------
-def amex_bonus_hint(price):
-    if price >= 220000:
-        return "💳 Check Amex → Qatar/FlyingBlue bonus (20–40% promos common)"
-    return ""
+# ---------------- AWARD ENGINE ----------------
+def estimate_miles(dest):
+    return 140000
+
+def miles_value_check(price,dest):
+    miles=estimate_miles(dest)
+    taxes=35000
+    value=(price-taxes)/miles
+
+    if value>2:
+        label=f"🔥 GREAT VALUE (~₹{round(value,2)}/mile)"
+    elif value>1.4:
+        label=f"👍 OK VALUE (~₹{round(value,2)}/mile)"
+    else:
+        label="❌ Poor miles value"
+
+    return label,value
+
+# ---------------- DEAL SCORING ----------------
+def deal_score(price,total_minutes,value_per_mile):
+    return (
+        price/1000 +
+        total_minutes/10 -
+        value_per_mile*50
+    )
+
+# ---------------- AIRLINE LINKS ----------------
+def airline_link(airline,origin,dest,date):
+    date=str(date)
+
+    if "Qatar" in airline:
+        return f"https://www.qatarairways.com/en-in/book-a-flight.html?from={origin}&to={dest}&date={date}"
+    if "Emirates" in airline:
+        return f"https://www.emirates.com/in/english/book/?origin={origin}&destination={dest}&departureDate={date}"
+    if "Etihad" in airline:
+        return f"https://www.etihad.com/en-in/book?origin={origin}&destination={dest}&departureDate={date}"
+    if "Lufthansa" in airline:
+        return f"https://www.lufthansa.com/in/en/booking?origin={origin}&destination={dest}&outboundDate={date}"
+    if "Air France" in airline:
+        return f"https://wwws.airfrance.co.in/search/flights?origin={origin}&destination={dest}&date={date}"
+    if "KLM" in airline:
+        return f"https://www.klm.co.in/search?origin={origin}&destination={dest}&date={date}"
+
+    return "Search on airline website"
 
 # ---------------- WHATSAPP ----------------
 def send_whatsapp(msg):
     if not TWILIO_SID:
         return
 
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
+    url=f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
 
     requests.post(
         url,
-        auth=(TWILIO_SID, TWILIO_TOKEN),
-        data={
-            "From": TWILIO_FROM,
-            "To": TWILIO_TO,
-            "Body": msg
-        }
+        auth=(TWILIO_SID,TWILIO_TOKEN),
+        data={"From":TWILIO_FROM,"To":TWILIO_TO,"Body":msg}
     )
 
 # ---------------- SEARCH ----------------
-def search_flights(depart_date, return_date, dest):
+def search_flights(depart_date,return_date,dest):
 
-    cache = load_cache()
+    cache=load_cache()
 
-    params = {
-        "engine": "google_flights",
-        "departure_id": "DEL",
-        "arrival_id": dest,
-        "outbound_date": str(depart_date),
-        "return_date": str(return_date),
-        "currency": "INR",
-        "api_key": SERPAPI_KEY,
-        "travel_class": 2
+    params={
+        "engine":"google_flights",
+        "departure_id":"DEL",
+        "arrival_id":dest,
+        "outbound_date":str(depart_date),
+        "return_date":str(return_date),
+        "currency":"INR",
+        "api_key":SERPAPI_KEY,
+        "travel_class":2
     }
 
-    data = requests.get(
+    data=requests.get(
         "https://serpapi.com/search.json",
         params=params
     ).json()
 
-    deals = []
+    found=[]
 
-    for f in data.get("best_flights", []):
+    for f in data.get("best_flights",[]):
 
-        price = f.get("price", 999999)
-        if price > MAX_BUDGET:
+        price=f.get("price",999999)
+        if price>MAX_BUDGET:
             continue
 
-        legs = f.get("flights", [])
-        if not legs:
+        outbound=f.get("outbound_flights",[])
+        inbound=f.get("return_flights",[])
+
+        if not outbound or not inbound:
             continue
 
-        # 1 stop max
-        if len(legs) - 1 > 1:
-            continue
-
-        airline = legs[0].get("airline", "")
+        airline=outbound[0].get("airline","")
         if not any(a in airline for a in AIRLINES_ALLOWED):
             continue
 
-        # duration
-        total_min = sum(x.get("duration",0) for x in legs)
-        duration = f"{total_min//60}h {total_min%60}m"
+        if len(outbound)-1>1 or len(inbound)-1>1:
+            continue
 
-        # layover
-        layover_city = "Direct"
-        if len(legs) > 1:
-            layover_city = legs[0]["arrival_airport"]["name"]
+        # ----- durations -----
+        def leg_minutes(legs):
+            return sum(x["duration"] for x in legs)
 
-        # red-eye check
-        dep_time = legs[0]["departure_airport"]["time"]
-        red_eye = "🌙 Red-eye" if dep_time.startswith(("22","23","00","01","02","03")) else ""
+        out_total=leg_minutes(outbound)
+        in_total=leg_minutes(inbound)
+        roundtrip_total=out_total+in_total
 
-        # price drop tracking
-        key = f"{dest}_{depart_date}"
-        drop = ""
-        if key in cache and price < cache[key]:
-            drop = f"📉 Drop ₹{cache[key]-price}"
-        cache[key] = price
+        def fmt(m):
+            return f"{m//60}h {m%60}m"
+
+        # ----- paths -----
+        def build_path(legs):
+            lines=[]
+            for leg in legs:
+                dep=leg["departure_airport"]["id"]
+                arr=leg["arrival_airport"]["id"]
+                dt=leg["departure_airport"]["time"]
+                at=leg["arrival_airport"]["time"]
+                lines.append(f"{dep} {dt} → {arr} {at}")
+            return "\n".join(lines)
+
+        out_path=build_path(outbound)
+        in_path=build_path(inbound)
+
+        # ----- layovers -----
+        out_lay=outbound[0]["arrival_airport"]["id"] if len(outbound)>1 else "Direct"
+        in_lay=inbound[0]["arrival_airport"]["id"] if len(inbound)>1 else "Direct"
+
+        # ----- price drop -----
+        key=f"{dest}_{depart_date}"
+        drop=""
+        if key in cache and price<cache[key]:
+            drop=f"📉 Drop ₹{cache[key]-price}"
+        cache[key]=price
         save_cache(cache)
 
-        # advice logic
-        if price <= SNIPER_PRICE:
-            advice = "🚨 ULTRA SNIPER FARE — BOOK NOW"
-            send_whatsapp(f"🚨 SNIPER DEAL ₹{price} to {dest}! Book NOW!")
-        elif price <= 160000:
-            advice = "✅ Good cash fare"
+        # ----- miles value -----
+        miles_label,value_per_mile=miles_value_check(price,dest)
+
+        # ----- advice -----
+        if price<=SNIPER_PRICE:
+            advice="🚨 ULTRA SNIPER — BOOK NOW"
+            send_whatsapp(f"🚨 SNIPER ₹{price} to {dest}! BOOK NOW!")
+        elif price<=160000:
+            advice="✅ Good cash fare"
         else:
-            advice = "✈️ Consider miles"
+            advice="✈️ Consider miles"
 
-        amex = amex_bonus_hint(price)
+        link=airline_link(airline,"DEL",dest,depart_date)
 
-        # booking link
-        link = (
-            f"https://www.google.com/travel/flights?"
-            f"#flt=DEL.{dest}.{depart_date}*"
-            f"{dest}.DEL.{return_date};c:INR;e:1;sc:b"
-        )
+        score=deal_score(price,roundtrip_total,value_per_mile)
 
-        deals.append(f"""
-💺 BUSINESS CLASS
+        text=f"""
+💺 BUSINESS CLASS ROUNDTRIP
 
 ₹{price} {drop}
 {advice}
 
 Airline: {airline}
-Total Time: {duration}
-Layover: {layover_city}
-Depart: {dep_time} {red_eye}
+TOTAL TIME: {fmt(roundtrip_total)}
 
-{amex}
+────────────
+OUTBOUND
+Duration: {fmt(out_total)}
+Layover: {out_lay}
+{out_path}
 
-BOOK HERE:
+────────────
+RETURN
+Duration: {fmt(in_total)}
+Layover: {in_lay}
+{in_path}
+
+MILES VALUE:
+{miles_label}
+
+🎯 BOOK HERE:
 {link}
-""")
+"""
 
-    return deals
+        found.append({
+            "score":score,
+            "text":text
+        })
+
+    return found
+
+# ---------------- SCAN & RANK ----------------
+def scan_all():
+
+    ranked=[]
+
+    d=DEPARTURE_START
+    while d<=DEPARTURE_END:
+        r=d+datetime.timedelta(days=RETURN_DAYS)
+
+        for dest in DESTINATIONS:
+            ranked+=search_flights(d,r,dest)
+
+        d+=datetime.timedelta(days=1)
+
+    ranked.sort(key=lambda x:x["score"])
+
+    top5=ranked[:5]
+
+    return [x["text"] for x in top5]
 
 # ---------------- EMAIL ----------------
 def send_email(results):
 
     if not results:
-        print("No deals found")
+        print("No deals")
         return
 
-    body = "\n\n".join(results)
+    body="\n\n".join(results)
 
     requests.post(
         "https://api.sendgrid.com/v3/mail/send",
         headers={
-            "Authorization": f"Bearer {SENDGRID_API_KEY}",
-            "Content-Type": "application/json"
+            "Authorization":f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type":"application/json"
         },
         json={
             "personalizations":[{"to":[{"email":ALERT_EMAIL}]}],
             "from":{"email":ALERT_EMAIL},
-            "subject":"✈️ ULTIMATE Portugal Flight Alerts",
+            "subject":"🏆 TOP 5 Portugal Business Class Deals",
             "content":[{"type":"text/plain","value":body}]
         }
     )
 
-# ---------------- SCAN LOOP ----------------
-def scan_all():
-    all_deals = []
-    d = DEPARTURE_START
-
-    while d <= DEPARTURE_END:
-        r = d + datetime.timedelta(days=RETURN_DAYS)
-
-        for dest in DESTINATIONS:
-            all_deals += search_flights(d, r, dest)
-
-        d += datetime.timedelta(days=1)
-
-    return all_deals
-
-# ---------------- RUN EVERY 8 HOURS ----------------
-if __name__ == "__main__":
-
+# ---------------- LOOP ----------------
+if __name__=="__main__":
     while True:
-        print("Running scan...")
-        deals = scan_all()
+        print("Scanning...")
+        deals=scan_all()
         send_email(deals)
-
-        print("Sleeping 8 hours...")
+        print("Sleeping 8h")
         time.sleep(28800)
