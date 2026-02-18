@@ -10,20 +10,40 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
-MAX_BUDGET = 200000  # 2L INR max
-DESTINATIONS = ["LIS", "OPO"]  # Lisbon + Porto
+MAX_BUDGET = 200000  # 2L INR
+DESTINATIONS = ["LIS", "OPO"]
 
 DEPARTURE_START = datetime.date(2026, 7, 27)
 DEPARTURE_END = datetime.date(2026, 7, 31)
 
-RETURN_DAYS = 7  # trip duration
-AIRLINES_ALLOWED = ["Qatar", "Emirates", "Etihad", "Lufthansa", "Air France", "KLM"]
+RETURN_DAYS = 7
+
+AIRLINES_ALLOWED = [
+    "Qatar",
+    "Emirates",
+    "Etihad",
+    "Lufthansa",
+    "Air France",
+    "KLM"
+]
+
+# ---------------------------------------------------
+# MILES DECISION ENGINE
+# ---------------------------------------------------
+def miles_advice(price):
+    if price <= 160000:
+        return "✅ PAY CASH (great deal)"
+    elif price >= 220000:
+        return "✈️ USE AMEX MILES"
+    else:
+        return "🤔 CASH vs MILES — compare"
 
 
 # ---------------------------------------------------
 # SEARCH FLIGHTS
 # ---------------------------------------------------
 def search_flights(depart_date, return_date, dest):
+
     print(f"Checking {dest} | Depart {depart_date}")
 
     url = "https://serpapi.com/search.json"
@@ -44,21 +64,22 @@ def search_flights(depart_date, return_date, dest):
     try:
         r = requests.get(url, params=params, timeout=60)
         data = r.json()
-    except Exception as e:
-        print("API error:", e)
+    except:
         return []
 
-    results = []
+    deals = []
 
     if "best_flights" not in data:
         return []
 
     for flight in data["best_flights"]:
+
         price = flight.get("price", 999999)
 
         if price > MAX_BUDGET:
             continue
 
+        # Airline filter
         airline_ok = False
         for f in flight.get("flights", []):
             airline = f.get("airline", "")
@@ -68,52 +89,58 @@ def search_flights(depart_date, return_date, dest):
         if not airline_ok:
             continue
 
+        # Stop filter
         stops = len(flight.get("flights", [])) - 1
         if stops > 1:
             continue
 
-        results.append(
-            f"""
+        advice = miles_advice(price)
+
+        deals.append(f"""
 PRICE: ₹{price}
+ADVICE: {advice}
 ROUTE: DEL → {dest}
 DEPART: {depart_date}
 RETURN: {return_date}
 AIRLINE: {flight['flights'][0]['airline']}
-BOOK: {flight.get('link','N/A')}
-"""
-        )
-
-    return results
-
-
-# ---------------------------------------------------
-# SCAN ALL DATES
-# ---------------------------------------------------
-def scan_all():
-    print("Starting GOD MODE scan...")
-
-    deals = []
-
-    d = DEPARTURE_START
-    while d <= DEPARTURE_END:
-        ret = d + datetime.timedelta(days=RETURN_DAYS)
-
-        for dest in DESTINATIONS:
-            res = search_flights(d, ret, dest)
-            deals.extend(res)
-
-        d += datetime.timedelta(days=1)
-        time.sleep(2)
+BOOKING LINK: {flight.get('link','N/A')}
+""")
 
     return deals
 
 
 # ---------------------------------------------------
-# SEND EMAIL VIA SENDGRID
+# SCAN DATES
+# ---------------------------------------------------
+def scan_all():
+
+    print("Starting GOD MODE scan...")
+
+    all_deals = []
+
+    d = DEPARTURE_START
+
+    while d <= DEPARTURE_END:
+
+        ret = d + datetime.timedelta(days=RETURN_DAYS)
+
+        for dest in DESTINATIONS:
+            deals = search_flights(d, ret, dest)
+            all_deals.extend(deals)
+
+        d += datetime.timedelta(days=1)
+        time.sleep(2)
+
+    return all_deals
+
+
+# ---------------------------------------------------
+# SEND EMAIL (SENDGRID)
 # ---------------------------------------------------
 def send_email(results):
+
     if not results:
-        print("No cheap flights today")
+        print("No good deals today")
         return
 
     body = "\n\n".join(results)
@@ -121,7 +148,7 @@ def send_email(results):
     data = {
         "personalizations": [{"to": [{"email": ALERT_EMAIL}]}],
         "from": {"email": ALERT_EMAIL},
-        "subject": "🔥 GOD MODE: Portugal Business Class Deals Found",
+        "subject": "🔥 Portugal Business Class Deals (GOD MODE)",
         "content": [{"type": "text/plain", "value": body}]
     }
 
@@ -131,19 +158,21 @@ def send_email(results):
             "Authorization": f"Bearer {SENDGRID_API_KEY}",
             "Content-Type": "application/json"
         },
-        json=data,
-        timeout=30
+        json=data
     )
 
-    print("SendGrid response:", r.status_code, r.text)
+    print("SendGrid status:", r.status_code)
 
 
-# RUN FOREVER (daily automation)
+# ---------------------------------------------------
+# RUN FOREVER (EVERY 6 HOURS)
+# ---------------------------------------------------
 if __name__ == "__main__":
+
     while True:
-        print("Running daily scan...")
+
         results = scan_all()
         send_email(results)
 
-        print("Sleeping 12 hours...")
-        time.sleep(43200)  # 12 hrs
+        print("Sleeping 8 hours...")
+        time.sleep(14400)
