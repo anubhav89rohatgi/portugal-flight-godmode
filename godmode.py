@@ -2,6 +2,7 @@ import requests
 import os
 import datetime
 import time
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,8 +11,13 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
+TWILIO_FROM = os.getenv("TWILIO_FROM")
+TWILIO_TO = os.getenv("TWILIO_TO")
+
 MAX_BUDGET = 200000
-SNIPER_PRICE = 140000
+SNIPER_PRICE = 100000
 
 DESTINATIONS = ["LIS", "OPO"]
 
@@ -21,164 +27,188 @@ DEPARTURE_END = datetime.date(2026, 7, 31)
 RETURN_DAYS = 7
 
 AIRLINES_ALLOWED = [
-    "Qatar",
-    "Emirates",
-    "Etihad",
-    "Lufthansa",
-    "Air France",
-    "KLM"
+    "Qatar","Emirates","Etihad",
+    "Lufthansa","Air France","KLM"
 ]
 
-# ---------------------------------------------------
-# MILES + BONUS INTELLIGENCE
-# ---------------------------------------------------
-def miles_advice(price):
+CACHE_FILE = "price_cache.json"
 
-    if price <= SNIPER_PRICE:
-        return "🚨 MISTAKE FARE — BOOK NOW"
+# ---------------- CACHE ----------------
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        return json.load(open(CACHE_FILE))
+    return {}
 
-    elif price <= 160000:
-        return "✅ PAY CASH (great deal)"
+def save_cache(c):
+    json.dump(c, open(CACHE_FILE,"w"))
 
-    elif price >= 220000:
-        return "✈️ USE AMEX MILES\n💳 Check AMEX → Qatar / FlyingBlue transfer bonuses"
+# ---------------- AMEX BONUS HINT ----------------
+def amex_bonus_hint(price):
+    if price >= 220000:
+        return "💳 Check Amex → Qatar/FlyingBlue bonus (20–40% promos common)"
+    return ""
 
-    else:
-        return "🤔 CASH vs MILES — compare"
+# ---------------- WHATSAPP ----------------
+def send_whatsapp(msg):
+    if not TWILIO_SID:
+        return
 
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
 
-# ---------------------------------------------------
-# SEARCH FLIGHTS
-# ---------------------------------------------------
+    requests.post(
+        url,
+        auth=(TWILIO_SID, TWILIO_TOKEN),
+        data={
+            "From": TWILIO_FROM,
+            "To": TWILIO_TO,
+            "Body": msg
+        }
+    )
+
+# ---------------- SEARCH ----------------
 def search_flights(depart_date, return_date, dest):
 
-    print(f"Checking {dest} | Depart {depart_date}")
-
-    url = "https://serpapi.com/search.json"
+    cache = load_cache()
 
     params = {
         "engine": "google_flights",
         "departure_id": "DEL",
         "arrival_id": dest,
-        "outbound_date": depart_date.strftime("%Y-%m-%d"),
-        "return_date": return_date.strftime("%Y-%m-%d"),
+        "outbound_date": str(depart_date),
+        "return_date": str(return_date),
         "currency": "INR",
-        "hl": "en",
         "api_key": SERPAPI_KEY,
-        "travel_class": 2,
-        "deep_search": True
+        "travel_class": 2
     }
 
-    try:
-        r = requests.get(url, params=params, timeout=60)
-        data = r.json()
-    except:
-        return []
+    data = requests.get(
+        "https://serpapi.com/search.json",
+        params=params
+    ).json()
 
     deals = []
 
-    if "best_flights" not in data:
-        return []
+    for f in data.get("best_flights", []):
 
-    for flight in data["best_flights"]:
-
-        price = flight.get("price", 999999)
-
+        price = f.get("price", 999999)
         if price > MAX_BUDGET:
             continue
 
-        airline_ok = False
-        for f in flight.get("flights", []):
-            airline = f.get("airline", "")
-            if any(a.lower() in airline.lower() for a in AIRLINES_ALLOWED):
-                airline_ok = True
-
-        if not airline_ok:
+        legs = f.get("flights", [])
+        if not legs:
             continue
 
-        stops = len(flight.get("flights", [])) - 1
-        if stops > 1:
+        # 1 stop max
+        if len(legs) - 1 > 1:
             continue
 
-        advice = miles_advice(price)
+        airline = legs[0].get("airline", "")
+        if not any(a in airline for a in AIRLINES_ALLOWED):
+            continue
+
+        # duration
+        total_min = sum(x.get("duration",0) for x in legs)
+        duration = f"{total_min//60}h {total_min%60}m"
+
+        # layover
+        layover_city = "Direct"
+        if len(legs) > 1:
+            layover_city = legs[0]["arrival_airport"]["name"]
+
+        # red-eye check
+        dep_time = legs[0]["departure_airport"]["time"]
+        red_eye = "🌙 Red-eye" if dep_time.startswith(("22","23","00","01","02","03")) else ""
+
+        # price drop tracking
+        key = f"{dest}_{depart_date}"
+        drop = ""
+        if key in cache and price < cache[key]:
+            drop = f"📉 Drop ₹{cache[key]-price}"
+        cache[key] = price
+        save_cache(cache)
+
+        # advice logic
+        if price <= SNIPER_PRICE:
+            advice = "🚨 ULTRA SNIPER FARE — BOOK NOW"
+            send_whatsapp(f"🚨 SNIPER DEAL ₹{price} to {dest}! Book NOW!")
+        elif price <= 160000:
+            advice = "✅ Good cash fare"
+        else:
+            advice = "✈️ Consider miles"
+
+        amex = amex_bonus_hint(price)
+
+        # booking link
+        link = (
+            f"https://www.google.com/travel/flights?"
+            f"#flt=DEL.{dest}.{depart_date}*"
+            f"{dest}.DEL.{return_date};c:INR;e:1;sc:b"
+        )
 
         deals.append(f"""
-PRICE: ₹{price}
-ADVICE: {advice}
-ROUTE: DEL → {dest}
-DEPART: {depart_date}
-RETURN: {return_date}
-AIRLINE: {flight['flights'][0]['airline']}
-BOOK: {flight.get('link','N/A')}
+💺 BUSINESS CLASS
+
+₹{price} {drop}
+{advice}
+
+Airline: {airline}
+Total Time: {duration}
+Layover: {layover_city}
+Depart: {dep_time} {red_eye}
+
+{amex}
+
+BOOK HERE:
+{link}
 """)
 
     return deals
 
-
-# ---------------------------------------------------
-# SCAN DATES
-# ---------------------------------------------------
-def scan_all():
-
-    print("Starting GOD MODE scan...")
-
-    all_deals = []
-
-    d = DEPARTURE_START
-
-    while d <= DEPARTURE_END:
-
-        ret = d + datetime.timedelta(days=RETURN_DAYS)
-
-        for dest in DESTINATIONS:
-            deals = search_flights(d, ret, dest)
-            all_deals.extend(deals)
-
-        d += datetime.timedelta(days=1)
-        time.sleep(2)
-
-    return all_deals
-
-
-# ---------------------------------------------------
-# SEND EMAIL
-# ---------------------------------------------------
+# ---------------- EMAIL ----------------
 def send_email(results):
 
     if not results:
-        print("No good deals today")
+        print("No deals found")
         return
 
     body = "\n\n".join(results)
 
-    data = {
-        "personalizations": [{"to": [{"email": ALERT_EMAIL}]}],
-        "from": {"email": ALERT_EMAIL},
-        "subject": "🔥 GOD MODE: Portugal Flight Sniper Alert",
-        "content": [{"type": "text/plain", "value": body}]
-    }
-
-    r = requests.post(
+    requests.post(
         "https://api.sendgrid.com/v3/mail/send",
         headers={
             "Authorization": f"Bearer {SENDGRID_API_KEY}",
             "Content-Type": "application/json"
         },
-        json=data
+        json={
+            "personalizations":[{"to":[{"email":ALERT_EMAIL}]}],
+            "from":{"email":ALERT_EMAIL},
+            "subject":"✈️ ULTIMATE Portugal Flight Alerts",
+            "content":[{"type":"text/plain","value":body}]
+        }
     )
 
-    print("SendGrid status:", r.status_code)
+# ---------------- SCAN LOOP ----------------
+def scan_all():
+    all_deals = []
+    d = DEPARTURE_START
 
+    while d <= DEPARTURE_END:
+        r = d + datetime.timedelta(days=RETURN_DAYS)
 
-# ---------------------------------------------------
-# RUN EVERY 8 HOURS
-# ---------------------------------------------------
+        for dest in DESTINATIONS:
+            all_deals += search_flights(d, r, dest)
+
+        d += datetime.timedelta(days=1)
+
+    return all_deals
+
+# ---------------- RUN EVERY 8 HOURS ----------------
 if __name__ == "__main__":
 
     while True:
-
-        results = scan_all()
-        send_email(results)
+        print("Running scan...")
+        deals = scan_all()
+        send_email(deals)
 
         print("Sleeping 8 hours...")
-        time.sleep(14400)
+        time.sleep(28800)
