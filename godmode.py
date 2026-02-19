@@ -18,12 +18,7 @@ DEPARTURE_START = BASE_DEPARTURE - datetime.timedelta(days=2)
 DEPARTURE_END = BASE_DEPARTURE + datetime.timedelta(days=2)
 RETURN_DAYS = 7
 
-AIRLINES_ALLOWED = [
-    "Qatar", "Emirates", "Etihad",
-    "Lufthansa", "Air France", "KLM"
-]
-
-# ---------------- SCORING ----------------
+# ---------------- BOOK SCORE ----------------
 def booking_score(price):
     if price < 120000:
         return 9, "🔥 BOOK NOW", "High"
@@ -71,6 +66,7 @@ def search_flights(depart, ret, dest):
         "return_date": str(ret),
         "currency": "INR",
         "api_key": SERPAPI_KEY,
+        "travel_class": 2,
         "deep_search": True
     }
 
@@ -87,17 +83,28 @@ def search_flights(depart, ret, dest):
         if not price:
             continue
 
-        segments = f.get("flights", [])
-        if not segments:
+        outbound = f.get("outbound_flights", [])
+        inbound = f.get("return_flights", [])
+
+        # ❗ CRITICAL FIX: ensure round-trip exists
+        if not outbound or not inbound:
             continue
 
-        cabins = [str(s.get("travel_class") or s.get("class")) for s in segments]
-        duration = sum(s.get("duration", 0) for s in segments)
-        airline = segments[0].get("airline", "Unknown")
+        def extract(legs):
+            duration = sum(l.get("duration", 0) for l in legs)
+            airline = legs[0].get("airline", "Unknown")
+            cabins = [str(l.get("travel_class") or l.get("class")) for l in legs]
+            return duration, airline, cabins
+
+        out_dur, airline, cabins_out = extract(outbound)
+        in_dur, _, cabins_in = extract(inbound)
+
+        total_duration = out_dur + in_dur
+        cabins = cabins_out + cabins_in
 
         entry = {
             "price": price,
-            "duration": duration,
+            "duration": total_duration,
             "airline": airline,
             "depart": depart,
             "return": ret,
@@ -118,28 +125,25 @@ def format_flight(f, cabin):
 
     score, decision, confidence = booking_score(f["price"])
 
-    g_link = google_link("DEL", f["dest"], f["depart"], f["return"])
-    a_link = airline_link(f["airline"], "DEL", f["dest"])
-
     return f"""
-₹{f['price']}
+₹{f['price']} (ROUND TRIP)
 Cabin: {cabin}
 Airline: {f['airline']}
 
-Route: DEL → {f['dest']}
+Route: DEL ↔ {f['dest']}
 Depart: {f['depart']}
 Return: {f['return']}
 
-Duration: {f['duration']//60}h {f['duration']%60}m
+Total Duration: {f['duration']//60}h {f['duration']%60}m
 
 📊 Score: {score}/10 → {decision}
 Confidence: {confidence}
 
 🔗 Google Flights:
-{g_link}
+{google_link('DEL', f['dest'], f['depart'], f['return'])}
 
 🔗 Airline Search:
-{a_link}
+{airline_link(f['airline'], 'DEL', f['dest'])}
 """
 
 # ---------------- SCAN ----------------
@@ -167,7 +171,7 @@ def scan_all():
         all_business.sort(key=lambda x: x["price"])
         top = all_business[:5]
 
-        body = "🏆 TOP BUSINESS CLASS DEALS\n\n"
+        body = "🏆 TOP BUSINESS CLASS ROUND-TRIP DEALS\n\n"
 
         for f in top:
             body += format_flight(f, "Business Class")
