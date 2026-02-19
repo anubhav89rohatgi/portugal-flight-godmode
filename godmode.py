@@ -11,9 +11,6 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
-MAX_BUDGET = 600000
-SNIPER_PRICE = 100000
-
 DESTINATIONS = ["LIS", "OPO"]
 
 BASE_DEPARTURE = datetime.date(2026, 7, 31)
@@ -27,83 +24,25 @@ AIRLINES_ALLOWED = [
 ]
 
 # ---------------- SCORING ----------------
-def miles_value(price):
-    return (price - 35000) / 140000
-
-def deal_score(price, duration, value):
-    return price/1000 + duration/15 - value*60
-
-# ---------------- BOOK / WAIT ENGINE ----------------
-def booking_score(price, duration, airline, value):
-
-    # Base score from price
+def booking_score(price):
     if price < 120000:
-        score = 9
+        return 9, "🔥 BOOK NOW", "High"
     elif price < 150000:
-        score = 7.5
+        return 7.5, "👍 Good Deal", "Medium"
     elif price < 200000:
-        score = 6
+        return 6, "🤔 Consider", "Medium"
     else:
-        score = 4
-
-    # Duration adjustment
-    if duration < 900:   # <15h
-        score += 0.5
-    elif duration > 1200:
-        score -= 0.5
-
-    # Airline preference
-    if any(a in airline for a in AIRLINES_ALLOWED):
-        score += 0.5
-
-    # Miles value bonus
-    if value > 2:
-        score += 0.5
-
-    # Clamp
-    score = max(1, min(10, round(score, 1)))
-
-    # Label
-    if score >= 8:
-        decision = "🔥 BOOK NOW"
-        confidence = "High"
-    elif score >= 6:
-        decision = "👍 Good Deal"
-        confidence = "Medium"
-    else:
-        decision = "⏳ WAIT"
-        confidence = "Low"
-
-    return score, decision, confidence
+        return 4, "⏳ Wait", "Low"
 
 # ---------------- LINKS ----------------
-def airline_homepage(airline):
-    if "Qatar" in airline:
-        return "https://www.qatarairways.com"
-    if "Emirates" in airline:
-        return "https://www.emirates.com"
-    if "Etihad" in airline:
-        return "https://www.etihad.com"
-    if "Lufthansa" in airline:
-        return "https://www.lufthansa.com"
-    if "Air France" in airline:
-        return "https://www.airfrance.com"
-    if "KLM" in airline:
-        return "https://www.klm.com"
-    return "Search airline"
-
 def google_link(origin, dest, depart, ret):
     return f"https://www.google.com/travel/flights?q=Flights%20from%20{origin}%20to%20{dest}%20on%20{depart}%20return%20{ret}"
 
+def airline_link(airline, origin, dest):
+    return f"https://www.google.com/search?q={airline}+{origin}+to+{dest}+flights"
+
 # ---------------- EMAIL ----------------
-def send_email(results):
-
-    subject = "🏆 TOP 5 Business Class Deals"
-
-    if not results:
-        body = "No Business Class deals found."
-    else:
-        body = "\n\n".join(results)
+def send_email(body):
 
     requests.post(
         "https://api.sendgrid.com/v3/mail/send",
@@ -114,7 +53,7 @@ def send_email(results):
         json={
             "personalizations":[{"to":[{"email": ALERT_EMAIL}]}],
             "from":{"email": ALERT_EMAIL},
-            "subject": subject,
+            "subject": "✈️ Flight Intelligence Report",
             "content":[{"type":"text/plain","value": body}]
         }
     )
@@ -124,8 +63,6 @@ def send_email(results):
 # ---------------- SEARCH ----------------
 def search_flights(depart, ret, dest):
 
-    print(f"\n🔎 Searching {dest} | Depart {depart}")
-
     params = {
         "engine": "google_flights",
         "departure_id": "DEL",
@@ -134,7 +71,6 @@ def search_flights(depart, ret, dest):
         "return_date": str(ret),
         "currency": "INR",
         "api_key": SERPAPI_KEY,
-        "travel_class": 2,
         "deep_search": True
     }
 
@@ -142,9 +78,8 @@ def search_flights(depart, ret, dest):
     data = r.json()
 
     flights = data.get("best_flights", [])
-    print("Flights returned:", len(flights))
 
-    found = []
+    business, premium, economy = [], [], []
 
     for f in flights:
 
@@ -156,77 +91,111 @@ def search_flights(depart, ret, dest):
         if not segments:
             continue
 
-        # --- BUSINESS CLASS FILTER ---
-        cabins = [s.get("travel_class") or s.get("class") for s in segments]
-
-        if not any("Business" in str(c) for c in cabins):
-            continue
-
-        airline = segments[0].get("airline", "Unknown")
+        cabins = [str(s.get("travel_class") or s.get("class")) for s in segments]
         duration = sum(s.get("duration", 0) for s in segments)
+        airline = segments[0].get("airline", "Unknown")
 
-        value = miles_value(price)
-        score = deal_score(price, duration, value)
+        entry = {
+            "price": price,
+            "duration": duration,
+            "airline": airline,
+            "depart": depart,
+            "return": ret,
+            "dest": dest
+        }
 
-        book_score, decision, confidence = booking_score(
-            price, duration, airline, value
-        )
+        if any("Business" in c for c in cabins):
+            business.append(entry)
+        elif any("Premium" in c for c in cabins):
+            premium.append(entry)
+        else:
+            economy.append(entry)
 
-        g_link = google_link("DEL", dest, depart, ret)
-        a_link = airline_homepage(airline)
+    return business, premium, economy
 
-        text = f"""
-₹{price}
-Cabin: Business Class
-Airline: {airline}
+# ---------------- FORMAT ----------------
+def format_flight(f, cabin):
 
-Route: DEL → {dest}
-Depart: {depart}
-Return: {ret}
+    score, decision, confidence = booking_score(f["price"])
 
-Total Duration: {duration//60}h {duration%60}m
+    g_link = google_link("DEL", f["dest"], f["depart"], f["return"])
+    a_link = airline_link(f["airline"], "DEL", f["dest"])
 
-📊 Book Score: {book_score}/10
-Decision: {decision}
+    return f"""
+₹{f['price']}
+Cabin: {cabin}
+Airline: {f['airline']}
+
+Route: DEL → {f['dest']}
+Depart: {f['depart']}
+Return: {f['return']}
+
+Duration: {f['duration']//60}h {f['duration']%60}m
+
+📊 Score: {score}/10 → {decision}
 Confidence: {confidence}
 
 🔗 Google Flights:
 {g_link}
 
-🔗 Airline:
+🔗 Airline Search:
 {a_link}
 """
-
-        found.append({"score": score, "text": text})
-
-    return found
 
 # ---------------- SCAN ----------------
 def scan_all():
 
-    ranked = []
-    d = DEPARTURE_START
+    all_business, all_premium, all_economy = [], [], []
 
-    print("=== SCAN START ===")
+    d = DEPARTURE_START
 
     while d <= DEPARTURE_END:
 
         r = d + datetime.timedelta(days=RETURN_DAYS)
 
         for dest in DESTINATIONS:
-            ranked += search_flights(d, r, dest)
+            b, p, e = search_flights(d, r, dest)
+            all_business += b
+            all_premium += p
+            all_economy += e
 
         d += datetime.timedelta(days=1)
 
-    ranked.sort(key=lambda x: x["score"])
-    results = [x["text"] for x in ranked[:5]]
+    # -------- BUSINESS --------
+    if all_business:
 
-    print(f"Deals found: {len(results)}")
+        all_business.sort(key=lambda x: x["price"])
+        top = all_business[:5]
 
-    return results
+        body = "🏆 TOP BUSINESS CLASS DEALS\n\n"
+
+        for f in top:
+            body += format_flight(f, "Business Class")
+
+        return body
+
+    # -------- FALLBACK --------
+    body = "⚠️ NO BUSINESS CLASS AVAILABILITY\n\n"
+
+    if all_premium:
+        body += "Closest Premium Economy Options:\n"
+        for f in sorted(all_premium, key=lambda x: x["price"])[:3]:
+            body += format_flight(f, "Premium Economy")
+
+    if all_economy:
+        body += "\nEconomy Reference:\n"
+        for f in sorted(all_economy, key=lambda x: x["price"])[:2]:
+            body += format_flight(f, "Economy")
+
+    body += "\n📊 Insight:\nBusiness fares not available or priced high."
+
+    return body
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
 
-    deals = scan_all()
-    send_email(deals)
+    try:
+        report = scan_all()
+        send_email(report)
+    except Exception as e:
+        print("ERROR:", e)
