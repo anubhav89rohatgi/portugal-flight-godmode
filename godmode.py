@@ -55,15 +55,30 @@ def send_email(body):
 
     print("Email sent")
 
-# ---------------- SAFE EXTRACT ----------------
-def extract_duration(legs):
-    return sum(l.get("duration", 0) for l in legs) if legs else 0
+# ---------------- LEG FORMAT ----------------
+def format_leg(legs):
 
-def extract_airline(legs):
-    return legs[0].get("airline", "Unknown") if legs else "Unknown"
+    route = []
+    total_duration = 0
 
-def extract_cabins(legs):
-    return [str(l.get("travel_class") or l.get("class")) for l in legs] if legs else []
+    for l in legs:
+        route.append(l["departure_airport"]["id"])
+        total_duration += l.get("duration", 0)
+
+    route.append(legs[-1]["arrival_airport"]["id"])
+
+    route_str = " → ".join(route)
+
+    # Layover calculation
+    layover_info = ""
+    if len(legs) > 1:
+        stops = []
+        for i in range(len(legs)-1):
+            city = legs[i]["arrival_airport"]["id"]
+            stops.append(city)
+        layover_info = f"Layover: {', '.join(stops)}"
+
+    return route_str, total_duration, layover_info
 
 # ---------------- SEARCH ----------------
 def search_flights(depart, ret, dest):
@@ -96,48 +111,54 @@ def search_flights(depart, ret, dest):
         outbound = f.get("outbound_flights", [])
         inbound = f.get("return_flights", [])
 
-        # --- BUSINESS: strict round-trip ---
+        # --- BUSINESS (strict) ---
         if outbound and inbound:
 
-            out_dur = extract_duration(outbound)
-            in_dur = extract_duration(inbound)
-            airline = extract_airline(outbound)
+            out_route, out_dur, out_lay = format_leg(outbound)
+            in_route, in_dur, in_lay = format_leg(inbound)
 
-            cabins = extract_cabins(outbound) + extract_cabins(inbound)
-
-            total_duration = out_dur + in_dur
+            cabins = [str(l.get("travel_class") or l.get("class")) for l in outbound+inbound]
 
             entry = {
                 "price": price,
-                "duration": total_duration,
-                "airline": airline,
+                "airline": outbound[0].get("airline", "Unknown"),
                 "depart": depart,
                 "return": ret,
-                "dest": dest
+                "dest": dest,
+                "out_route": out_route,
+                "in_route": in_route,
+                "out_dur": out_dur,
+                "in_dur": in_dur,
+                "out_lay": out_lay,
+                "in_lay": in_lay
             }
 
             if any("Business" in c for c in cabins):
                 business.append(entry)
                 continue
 
-        # --- FALLBACK (less strict parsing) ---
+        # --- FALLBACK ---
         segments = f.get("flights", [])
-
         if not segments:
             continue
 
-        duration = extract_duration(segments)
-        airline = extract_airline(segments)
-        cabins = extract_cabins(segments)
+        route, dur, lay = format_leg(segments)
 
         entry = {
             "price": price,
-            "duration": duration,
-            "airline": airline,
+            "airline": segments[0].get("airline", "Unknown"),
             "depart": depart,
             "return": ret,
-            "dest": dest
+            "dest": dest,
+            "out_route": route,
+            "in_route": "",
+            "out_dur": dur,
+            "in_dur": 0,
+            "out_lay": lay,
+            "in_lay": ""
         }
+
+        cabins = [str(l.get("travel_class") or l.get("class")) for l in segments]
 
         if any("Premium" in c for c in cabins):
             premium.append(entry)
@@ -156,11 +177,15 @@ def format_flight(f, cabin):
 Cabin: {cabin}
 Airline: {f['airline']}
 
-Route: DEL ↔ {f['dest']}
-Depart: {f['depart']}
-Return: {f['return']}
+📍 Outbound:
+{f['out_route']}
+Duration: {f['out_dur']//60}h {f['out_dur']%60}m
+{f['out_lay']}
 
-Duration: {f['duration']//60}h {f['duration']%60}m
+📍 Return:
+{f['in_route']}
+Duration: {f['in_dur']//60}h {f['in_dur']%60}m
+{f['in_lay']}
 
 📊 Score: {score}/10 → {decision}
 Confidence: {confidence}
@@ -168,7 +193,7 @@ Confidence: {confidence}
 🔗 Google Flights:
 {google_link('DEL', f['dest'], f['depart'], f['return'])}
 
-🔗 Airline Search:
+🔗 Airline:
 {airline_link(f['airline'], 'DEL', f['dest'])}
 """
 
@@ -191,33 +216,23 @@ def scan_all():
 
         d += datetime.timedelta(days=1)
 
-    # -------- BUSINESS --------
     if all_business:
 
         all_business.sort(key=lambda x: x["price"])
-        top = all_business[:5]
+        body = "🏆 TOP BUSINESS CLASS DEALS\n\n"
 
-        body = "🏆 TOP BUSINESS CLASS ROUND-TRIP DEALS\n\n"
-
-        for f in top:
+        for f in all_business[:5]:
             body += format_flight(f, "Business Class")
 
         return body
 
-    # -------- FALLBACK --------
     body = "⚠️ NO BUSINESS CLASS AVAILABILITY\n\n"
 
-    if all_premium:
-        body += "Closest Premium Economy Options:\n"
-        for f in sorted(all_premium, key=lambda x: x["price"])[:3]:
-            body += format_flight(f, "Premium Economy")
+    for f in sorted(all_premium, key=lambda x: x["price"])[:3]:
+        body += format_flight(f, "Premium Economy")
 
-    if all_economy:
-        body += "\nEconomy Reference:\n"
-        for f in sorted(all_economy, key=lambda x: x["price"])[:2]:
-            body += format_flight(f, "Economy")
-
-    body += "\n📊 Insight:\nBusiness fares not available or priced high."
+    for f in sorted(all_economy, key=lambda x: x["price"])[:2]:
+        body += format_flight(f, "Economy")
 
     return body
 
