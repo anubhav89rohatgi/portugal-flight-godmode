@@ -55,6 +55,16 @@ def send_email(body):
 
     print("Email sent")
 
+# ---------------- SAFE EXTRACT ----------------
+def extract_duration(legs):
+    return sum(l.get("duration", 0) for l in legs) if legs else 0
+
+def extract_airline(legs):
+    return legs[0].get("airline", "Unknown") if legs else "Unknown"
+
+def extract_cabins(legs):
+    return [str(l.get("travel_class") or l.get("class")) for l in legs] if legs else []
+
 # ---------------- SEARCH ----------------
 def search_flights(depart, ret, dest):
 
@@ -86,34 +96,50 @@ def search_flights(depart, ret, dest):
         outbound = f.get("outbound_flights", [])
         inbound = f.get("return_flights", [])
 
-        # ❗ CRITICAL FIX: ensure round-trip exists
-        if not outbound or not inbound:
+        # --- BUSINESS: strict round-trip ---
+        if outbound and inbound:
+
+            out_dur = extract_duration(outbound)
+            in_dur = extract_duration(inbound)
+            airline = extract_airline(outbound)
+
+            cabins = extract_cabins(outbound) + extract_cabins(inbound)
+
+            total_duration = out_dur + in_dur
+
+            entry = {
+                "price": price,
+                "duration": total_duration,
+                "airline": airline,
+                "depart": depart,
+                "return": ret,
+                "dest": dest
+            }
+
+            if any("Business" in c for c in cabins):
+                business.append(entry)
+                continue
+
+        # --- FALLBACK (less strict parsing) ---
+        segments = f.get("flights", [])
+
+        if not segments:
             continue
 
-        def extract(legs):
-            duration = sum(l.get("duration", 0) for l in legs)
-            airline = legs[0].get("airline", "Unknown")
-            cabins = [str(l.get("travel_class") or l.get("class")) for l in legs]
-            return duration, airline, cabins
-
-        out_dur, airline, cabins_out = extract(outbound)
-        in_dur, _, cabins_in = extract(inbound)
-
-        total_duration = out_dur + in_dur
-        cabins = cabins_out + cabins_in
+        duration = extract_duration(segments)
+        airline = extract_airline(segments)
+        cabins = extract_cabins(segments)
 
         entry = {
             "price": price,
-            "duration": total_duration,
+            "duration": duration,
             "airline": airline,
             "depart": depart,
             "return": ret,
             "dest": dest
         }
 
-        if any("Business" in c for c in cabins):
-            business.append(entry)
-        elif any("Premium" in c for c in cabins):
+        if any("Premium" in c for c in cabins):
             premium.append(entry)
         else:
             economy.append(entry)
@@ -126,7 +152,7 @@ def format_flight(f, cabin):
     score, decision, confidence = booking_score(f["price"])
 
     return f"""
-₹{f['price']} (ROUND TRIP)
+₹{f['price']}
 Cabin: {cabin}
 Airline: {f['airline']}
 
@@ -134,7 +160,7 @@ Route: DEL ↔ {f['dest']}
 Depart: {f['depart']}
 Return: {f['return']}
 
-Total Duration: {f['duration']//60}h {f['duration']%60}m
+Duration: {f['duration']//60}h {f['duration']%60}m
 
 📊 Score: {score}/10 → {decision}
 Confidence: {confidence}
