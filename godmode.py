@@ -1,7 +1,6 @@
 import requests
 import os
 import datetime
-import time
 from dotenv import load_dotenv
 
 print("=== BOT FILE STARTED ===")
@@ -34,32 +33,75 @@ def miles_value(price):
 def deal_score(price, duration, value):
     return price/1000 + duration/15 - value*60
 
-# ---------------- AIRLINE LINKS ----------------
-def airline_link(airline, origin, dest, date):
-    date = str(date)
+# ---------------- BOOK / WAIT ENGINE ----------------
+def booking_score(price, duration, airline, value):
 
+    # Base score from price
+    if price < 120000:
+        score = 9
+    elif price < 150000:
+        score = 7.5
+    elif price < 200000:
+        score = 6
+    else:
+        score = 4
+
+    # Duration adjustment
+    if duration < 900:   # <15h
+        score += 0.5
+    elif duration > 1200:
+        score -= 0.5
+
+    # Airline preference
+    if any(a in airline for a in AIRLINES_ALLOWED):
+        score += 0.5
+
+    # Miles value bonus
+    if value > 2:
+        score += 0.5
+
+    # Clamp
+    score = max(1, min(10, round(score, 1)))
+
+    # Label
+    if score >= 8:
+        decision = "🔥 BOOK NOW"
+        confidence = "High"
+    elif score >= 6:
+        decision = "👍 Good Deal"
+        confidence = "Medium"
+    else:
+        decision = "⏳ WAIT"
+        confidence = "Low"
+
+    return score, decision, confidence
+
+# ---------------- LINKS ----------------
+def airline_homepage(airline):
     if "Qatar" in airline:
-        return f"https://www.qatarairways.com/en-in/book-a-flight.html?from={origin}&to={dest}&date={date}"
+        return "https://www.qatarairways.com"
     if "Emirates" in airline:
-        return f"https://www.emirates.com/in/english/book/?origin={origin}&destination={dest}&departureDate={date}"
+        return "https://www.emirates.com"
     if "Etihad" in airline:
-        return f"https://www.etihad.com/en-in/book?origin={origin}&destination={dest}&departureDate={date}"
+        return "https://www.etihad.com"
     if "Lufthansa" in airline:
-        return f"https://www.lufthansa.com/in/en/booking?origin={origin}&destination={dest}&outboundDate={date}"
+        return "https://www.lufthansa.com"
     if "Air France" in airline:
-        return f"https://wwws.airfrance.co.in/search/flights?origin={origin}&destination={dest}&date={date}"
+        return "https://www.airfrance.com"
     if "KLM" in airline:
-        return f"https://www.klm.co.in/search?origin={origin}&destination={dest}&date={date}"
+        return "https://www.klm.com"
+    return "Search airline"
 
-    return "Search airline site"
+def google_link(origin, dest, depart, ret):
+    return f"https://www.google.com/travel/flights?q=Flights%20from%20{origin}%20to%20{dest}%20on%20{depart}%20return%20{ret}"
 
 # ---------------- EMAIL ----------------
 def send_email(results):
 
-    subject = "🏆 TOP 5 Premium Cabin Deals"
+    subject = "🏆 TOP 5 Business Class Deals"
 
     if not results:
-        body = "No Business/Premium Economy deals found."
+        body = "No Business Class deals found."
     else:
         body = "\n\n".join(results)
 
@@ -110,55 +152,32 @@ def search_flights(depart, ret, dest):
         if not price:
             continue
 
-        print("Price:", price)
-
         segments = f.get("flights", [])
-
         if not segments:
-            print("❌ No segments")
             continue
 
-        # --- CABIN DETECTION ---
-        cabin_classes = []
+        # --- BUSINESS CLASS FILTER ---
+        cabins = [s.get("travel_class") or s.get("class") for s in segments]
 
-        for s in segments:
-            cabin = s.get("travel_class") or s.get("class")
-            if cabin:
-                cabin_classes.append(cabin)
-
-        print("Cabins:", cabin_classes)
-
-        # Accept Business OR Premium Economy
-        if not any(
-            ("Business" in str(c) or "Premium" in str(c))
-            for c in cabin_classes
-        ):
-            print("❌ Not premium cabin")
+        if not any("Business" in str(c) for c in cabins):
             continue
-
-        # Identify dominant cabin
-        if any("Business" in str(c) for c in cabin_classes):
-            cabin_type = "Business Class"
-        else:
-            cabin_type = "Premium Economy"
 
         airline = segments[0].get("airline", "Unknown")
-
-        airline_penalty = 0
-        if not any(a in airline for a in AIRLINES_ALLOWED):
-            airline_penalty = 40
-
         duration = sum(s.get("duration", 0) for s in segments)
 
         value = miles_value(price)
-        score = deal_score(price, duration, value) + airline_penalty
+        score = deal_score(price, duration, value)
 
-        google_link = f"https://www.google.com/travel/flights?q=Flights%20from%20DEL%20to%20{dest}%20on%20{depart}"
-        airline_url = airline_link(airline, "DEL", dest, depart)
+        book_score, decision, confidence = booking_score(
+            price, duration, airline, value
+        )
+
+        g_link = google_link("DEL", dest, depart, ret)
+        a_link = airline_homepage(airline)
 
         text = f"""
 ₹{price}
-Cabin: {cabin_type}
+Cabin: Business Class
 Airline: {airline}
 
 Route: DEL → {dest}
@@ -167,11 +186,15 @@ Return: {ret}
 
 Total Duration: {duration//60}h {duration%60}m
 
-Book (Airline):
-{airline_url}
+📊 Book Score: {book_score}/10
+Decision: {decision}
+Confidence: {confidence}
 
-View on Google Flights:
-{google_link}
+🔗 Google Flights:
+{g_link}
+
+🔗 Airline:
+{a_link}
 """
 
         found.append({"score": score, "text": text})
@@ -191,7 +214,6 @@ def scan_all():
         r = d + datetime.timedelta(days=RETURN_DAYS)
 
         for dest in DESTINATIONS:
-            print(f"Checking {dest} | {d}")
             ranked += search_flights(d, r, dest)
 
         d += datetime.timedelta(days=1)
@@ -206,8 +228,5 @@ def scan_all():
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
 
-    try:
-        deals = scan_all()
-        send_email(deals)
-    except Exception as e:
-        print("ERROR:", e)
+    deals = scan_all()
+    send_email(deals)
