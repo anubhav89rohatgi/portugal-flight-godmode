@@ -55,30 +55,51 @@ def send_email(body):
 
     print("Email sent")
 
+# ---------------- TIME PARSE ----------------
+def parse_time(t):
+    return datetime.datetime.fromisoformat(t.replace("Z", ""))
+
+def layover_duration(arrival, next_departure):
+    diff = next_departure - arrival
+    mins = int(diff.total_seconds() / 60)
+    return f"{mins//60}h {mins%60}m"
+
 # ---------------- FORMAT LEG ----------------
 def format_leg(legs):
 
     route = []
-    duration = 0
+    total_duration = 0
+    layovers = []
 
-    for l in legs:
+    for i in range(len(legs)):
+
+        l = legs[i]
         route.append(l["departure_airport"]["id"])
-        duration += l.get("duration", 0)
+        total_duration += l.get("duration", 0)
+
+        # Layover calc
+        if i < len(legs) - 1:
+            next_leg = legs[i+1]
+
+            try:
+                arr = parse_time(l["arrival_time"])
+                dep = parse_time(next_leg["departure_time"])
+                lay = layover_duration(arr, dep)
+            except:
+                lay = "N/A"
+
+            city = l["arrival_airport"]["id"]
+            layovers.append(f"{city} ({lay})")
 
     route.append(legs[-1]["arrival_airport"]["id"])
 
-    layovers = []
-    if len(legs) > 1:
-        for i in range(len(legs)-1):
-            layovers.append(legs[i]["arrival_airport"]["id"])
-
     return {
         "route": " → ".join(route),
-        "duration": duration,
+        "duration": total_duration,
         "layover": ", ".join(layovers) if layovers else "Direct"
     }
 
-# ---------------- FETCH ONE-WAY ----------------
+# ---------------- FETCH ONE WAY ----------------
 def fetch_oneway(origin, dest, date):
 
     params = {
@@ -103,7 +124,8 @@ def search_dual(depart, ret, dest):
     outbound_list = fetch_oneway("DEL", dest, depart)
     inbound_list = fetch_oneway(dest, "DEL", ret)
 
-    results = []
+    business = []
+    premium = []
 
     for out in outbound_list[:5]:
         for inc in inbound_list[:5]:
@@ -114,17 +136,12 @@ def search_dual(depart, ret, dest):
             if not out_legs or not in_legs:
                 continue
 
-            # --- CABIN FILTER ---
             cabins = [
                 str(l.get("travel_class") or l.get("class"))
                 for l in (out_legs + in_legs)
             ]
 
-            if not any("Business" in c for c in cabins):
-                continue
-
-            price = (out.get("price", 0) + inc.get("price", 0))
-
+            price = out.get("price", 0) + inc.get("price", 0)
             airline = out_legs[0].get("airline", "Unknown")
 
             out_info = format_leg(out_legs)
@@ -140,17 +157,21 @@ def search_dual(depart, ret, dest):
                 "in": in_info
             }
 
-            results.append(entry)
+            if any("Business" in c for c in cabins):
+                business.append(entry)
+            elif any("Premium" in c for c in cabins):
+                premium.append(entry)
 
-    return results
+    return business, premium
 
 # ---------------- FORMAT ----------------
-def format_flight(f):
+def format_flight(f, cabin):
 
     score, decision, confidence = booking_score(f["price"])
 
     return f"""
 ₹{f['price']} (Combined)
+Cabin: {cabin}
 Airline: {f['airline']}
 
 📍 Outbound:
@@ -176,7 +197,8 @@ Confidence: {confidence}
 # ---------------- SCAN ----------------
 def scan_all():
 
-    all_results = []
+    all_business = []
+    all_premium = []
 
     d = DEPARTURE_START
 
@@ -185,22 +207,29 @@ def scan_all():
         r = d + datetime.timedelta(days=RETURN_DAYS)
 
         for dest in DESTINATIONS:
-            print(f"Checking {dest} | {d}")
-            all_results += search_dual(d, r, dest)
+            b, p = search_dual(d, r, dest)
+            all_business += b
+            all_premium += p
 
         d += datetime.timedelta(days=1)
 
-    all_results.sort(key=lambda x: x["price"])
+    # -------- BUSINESS --------
+    if all_business:
 
-    top = all_results[:5]
+        all_business.sort(key=lambda x: x["price"])
+        body = "🏆 TOP BUSINESS CLASS DEALS\n\n"
 
-    if not top:
-        return "⚠️ No Business Class combinations found."
+        for f in all_business[:5]:
+            body += format_flight(f, "Business Class")
 
-    body = "🏆 TOP BUSINESS CLASS ROUND-TRIP DEALS\n\n"
+        return body
 
-    for f in top:
-        body += format_flight(f)
+    # -------- PREMIUM FALLBACK --------
+    body = "⚠️ NO BUSINESS CLASS AVAILABLE\n\n"
+    body += "Closest Premium Economy Options:\n\n"
+
+    for f in sorted(all_premium, key=lambda x: x["price"])[:5]:
+        body += format_flight(f, "Premium Economy")
 
     return body
 
