@@ -28,23 +28,23 @@ AIRLINES_ALLOWED = [
     "Lufthansa", "Air France", "KLM"
 ]
 
+# ---------------- SCORING ----------------
 def miles_value_check(price):
     miles = 140000
     taxes = 35000
-    value = (price - taxes) / miles
-    return value
+    return (price - taxes) / miles
 
 def deal_score(price, total_minutes, value):
     return price/1000 + total_minutes/15 - value*60
 
-def airline_link(airline, origin, dest, date):
-    date = str(date)
+def airline_link(origin, dest, date):
     return f"https://www.google.com/travel/flights?q=Flights%20from%20{origin}%20to%20{dest}%20on%20{date}"
 
+# ---------------- EMAIL ----------------
 def send_email(results):
 
     subject = "🏆 TOP 5 Business Deals"
-    body = "\n\n".join(results) if results else "No business class deals found."
+    body = "\n\n".join(results) if results else "No deals found."
 
     requests.post(
         "https://api.sendgrid.com/v3/mail/send",
@@ -62,6 +62,7 @@ def send_email(results):
 
     print("Email sent")
 
+# ---------------- SEARCH ----------------
 def search_flights(depart, ret, dest):
 
     print(f"\n🔎 Searching {dest} | Depart {depart}")
@@ -88,40 +89,41 @@ def search_flights(depart, ret, dest):
 
     for f in flights:
 
-        price = f.get("price", 999999)
+        price = f.get("price")
         print("Price:", price)
 
-        outbound = f.get("outbound_flights") or []
-        inbound = f.get("return_flights") or []
-
-        if not outbound or not inbound:
-            print("❌ Missing legs")
+        if not price:
             continue
 
-        # --- Cabin check ---
-        cabin = outbound[0].get("travel_class", "")
-        print("Cabin:", cabin)
-
-        if "Business" not in cabin:
-            print("❌ Not business class")
+        if price > MAX_BUDGET:
             continue
 
-        airline = outbound[0].get("airline", "Unknown")
+        # ---- FLEXIBLE STRUCTURE HANDLING ----
+        segments = []
+
+        if "flights" in f:
+            segments = f["flights"]
+
+        elif "outbound_flights" in f:
+            segments += f.get("outbound_flights", [])
+            segments += f.get("return_flights", [])
+
+        if not segments:
+            print("❌ No segment data")
+            continue
+
+        airline = segments[0].get("airline", "Unknown")
 
         airline_penalty = 0
         if not any(a in airline for a in AIRLINES_ALLOWED):
             airline_penalty = 40
 
-        def mins(x):
-            return sum(l.get("duration", 0) for l in x)
-
-        total = mins(outbound) + mins(inbound)
+        total_minutes = sum(s.get("duration", 0) for s in segments)
 
         value = miles_value_check(price)
+        score = deal_score(price, total_minutes, value) + airline_penalty
 
-        score = deal_score(price, total, value) + airline_penalty
-
-        link = airline_link(airline, "DEL", dest, depart)
+        link = airline_link("DEL", dest, depart)
 
         text = f"""
 ₹{price}
@@ -129,7 +131,7 @@ Airline: {airline}
 Destination: {dest}
 Depart: {depart}
 Return: {ret}
-Total Duration: {total//60}h {total%60}m
+Total Duration: {total_minutes//60}h {total_minutes%60}m
 Booking: {link}
 """
 
@@ -137,6 +139,7 @@ Booking: {link}
 
     return found
 
+# ---------------- SCAN ----------------
 def scan_all():
 
     ranked = []
@@ -161,6 +164,7 @@ def scan_all():
 
     return results
 
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
 
     try:
