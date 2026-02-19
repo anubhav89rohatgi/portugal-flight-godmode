@@ -27,16 +27,41 @@ AIRLINES_ALLOWED = [
     "Lufthansa", "Air France", "KLM"
 ]
 
+# ---------------- SCORING ----------------
 def miles_value(price):
     return (price - 35000) / 140000
 
 def deal_score(price, duration, value):
     return price/1000 + duration/15 - value*60
 
+# ---------------- AIRLINE LINKS ----------------
+def airline_link(airline, origin, dest, date):
+    date = str(date)
+
+    if "Qatar" in airline:
+        return f"https://www.qatarairways.com/en-in/book-a-flight.html?from={origin}&to={dest}&date={date}"
+    if "Emirates" in airline:
+        return f"https://www.emirates.com/in/english/book/?origin={origin}&destination={dest}&departureDate={date}"
+    if "Etihad" in airline:
+        return f"https://www.etihad.com/en-in/book?origin={origin}&destination={dest}&departureDate={date}"
+    if "Lufthansa" in airline:
+        return f"https://www.lufthansa.com/in/en/booking?origin={origin}&destination={dest}&outboundDate={date}"
+    if "Air France" in airline:
+        return f"https://wwws.airfrance.co.in/search/flights?origin={origin}&destination={dest}&date={date}"
+    if "KLM" in airline:
+        return f"https://www.klm.co.in/search?origin={origin}&destination={dest}&date={date}"
+
+    return "Search airline site"
+
+# ---------------- EMAIL ----------------
 def send_email(results):
 
-    subject = "🏆 TOP 5 Business Deals"
-    body = "\n\n".join(results) if results else "No business class deals found."
+    subject = "🏆 TOP 5 Premium Cabin Deals"
+
+    if not results:
+        body = "No Business/Premium Economy deals found."
+    else:
+        body = "\n\n".join(results)
 
     requests.post(
         "https://api.sendgrid.com/v3/mail/send",
@@ -54,6 +79,7 @@ def send_email(results):
 
     print("Email sent")
 
+# ---------------- SEARCH ----------------
 def search_flights(depart, ret, dest):
 
     print(f"\n🔎 Searching {dest} | Depart {depart}")
@@ -92,7 +118,7 @@ def search_flights(depart, ret, dest):
             print("❌ No segments")
             continue
 
-        # --- STRICT CABIN CHECK ---
+        # --- CABIN DETECTION ---
         cabin_classes = []
 
         for s in segments:
@@ -100,11 +126,21 @@ def search_flights(depart, ret, dest):
             if cabin:
                 cabin_classes.append(cabin)
 
-        print("Cabin classes detected:", cabin_classes)
+        print("Cabins:", cabin_classes)
 
-        if not any("Business" in str(c) for c in cabin_classes):
-            print("❌ Not business class")
+        # Accept Business OR Premium Economy
+        if not any(
+            ("Business" in str(c) or "Premium" in str(c))
+            for c in cabin_classes
+        ):
+            print("❌ Not premium cabin")
             continue
+
+        # Identify dominant cabin
+        if any("Business" in str(c) for c in cabin_classes):
+            cabin_type = "Business Class"
+        else:
+            cabin_type = "Premium Economy"
 
         airline = segments[0].get("airline", "Unknown")
 
@@ -117,22 +153,32 @@ def search_flights(depart, ret, dest):
         value = miles_value(price)
         score = deal_score(price, duration, value) + airline_penalty
 
-        link = f"https://www.google.com/travel/flights?q=Flights%20from%20DEL%20to%20{dest}%20on%20{depart}"
+        google_link = f"https://www.google.com/travel/flights?q=Flights%20from%20DEL%20to%20{dest}%20on%20{depart}"
+        airline_url = airline_link(airline, "DEL", dest, depart)
 
         text = f"""
 ₹{price}
+Cabin: {cabin_type}
 Airline: {airline}
-Destination: {dest}
+
+Route: DEL → {dest}
 Depart: {depart}
 Return: {ret}
+
 Total Duration: {duration//60}h {duration%60}m
-Booking: {link}
+
+Book (Airline):
+{airline_url}
+
+View on Google Flights:
+{google_link}
 """
 
         found.append({"score": score, "text": text})
 
     return found
 
+# ---------------- SCAN ----------------
 def scan_all():
 
     ranked = []
@@ -157,7 +203,11 @@ def scan_all():
 
     return results
 
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
 
-    deals = scan_all()
-    send_email(deals)
+    try:
+        deals = scan_all()
+        send_email(deals)
+    except Exception as e:
+        print("ERROR:", e)
