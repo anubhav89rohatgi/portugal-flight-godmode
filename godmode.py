@@ -150,62 +150,88 @@ Time: {datetime.datetime.now()}
     )
 
 # ---------------- SEARCH ----------------
-def search_flights(depart,ret,dest):
+def search_flights(depart, ret, dest):
 
-    cache=load_cache()
+    print(f"\n🔎 Searching {dest} | Depart {depart} | Return {ret}")
 
-    params={
-        "engine":"google_flights",
-        "departure_id":"DEL",
-        "arrival_id":dest,
-        "outbound_date":str(depart),
-        "return_date":str(ret),
-        "currency":"INR",
-        "api_key":SERPAPI_KEY,
-        "travel_class":2
+    params = {
+        "engine": "google_flights",
+        "departure_id": "DEL",
+        "arrival_id": dest,
+        "outbound_date": str(depart),
+        "return_date": str(ret),
+        "currency": "INR",
+        "api_key": SERPAPI_KEY,
+        "travel_class": 2
     }
 
-    r=requests.get(
-        "https://serpapi.com/search.json",
-        params=params,
-        timeout=30
-    )
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=30
+        )
 
-    data=r.json()
+        print("API Status Code:", r.status_code)
 
-    found=[]
+        data = r.json()
 
-    for f in data.get("best_flights",[]):
+    except Exception as e:
+        print("❌ API ERROR:", e)
+        return []
 
-        price=f.get("price",999999)
-        if price>MAX_BUDGET:
+    best = data.get("best_flights", [])
+    print("Total best_flights returned:", len(best))
+
+    found = []
+
+    for idx, f in enumerate(best):
+
+        print(f"\n--- Checking flight #{idx+1} ---")
+
+        price = f.get("price", 999999)
+        print("Price:", price)
+
+        if price > MAX_BUDGET:
+            print("❌ Rejected: Over budget")
             continue
 
-        out=f.get("outbound_flights",[])
-        inc=f.get("return_flights",[])
+        out = f.get("outbound_flights", [])
+        inc = f.get("return_flights", [])
+
         if not out or not inc:
+            print("❌ Rejected: Missing outbound/return legs")
             continue
 
-        airline=out[0]["airline"]
+        airline = out[0]["airline"]
+        print("Airline:", airline)
+
         if not any(a in airline for a in AIRLINES_ALLOWED):
+            print("❌ Rejected: Airline not allowed")
             continue
 
-        def mins(x): return sum(l["duration"] for l in x)
+        def mins(x): 
+            return sum(l.get("duration", 0) for l in x)
 
-        out_m=mins(out)
-        in_m=mins(inc)
-        total=out_m+in_m
+        out_m = mins(out)
+        in_m = mins(inc)
+        total = out_m + in_m
 
-        miles_label,val=miles_value_check(price,dest)
+        print("Total duration (mins):", total)
 
-        if price<=SNIPER_PRICE:
+        miles_label, val = miles_value_check(price, dest)
+        print("Miles value score:", val)
+
+        if price <= SNIPER_PRICE:
+            print("🚨 SNIPER TRIGGERED")
             send_whatsapp(f"🚨 SNIPER ₹{price} to {dest}!")
 
-        link=airline_link(airline,"DEL",dest,depart)
+        link = airline_link(airline, "DEL", dest, depart)
 
-        score=deal_score(price,total,val)
+        score = deal_score(price, total, val)
+        print("Deal score:", score)
 
-        text=f"""
+        text = f"""
 ₹{price}
 Airline: {airline}
 Total Time: {total//60}h {total%60}m
@@ -217,10 +243,13 @@ Book:
 {link}
 """
 
-        found.append({"score":score,"text":text})
+        print("✅ Flight accepted")
+
+        found.append({"score": score, "text": text})
+
+    print(f"\nFlights accepted for {dest}: {len(found)}")
 
     return found
-
 # ---------------- SCAN ----------------
 def scan_all():
 
@@ -273,4 +302,5 @@ if __name__=="__main__":
 
             print("Sleeping 8h...")
             time.sleep(28800)
+
 
