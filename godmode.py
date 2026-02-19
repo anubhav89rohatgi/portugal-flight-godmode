@@ -14,17 +14,12 @@ SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
-TWILIO_SID = os.getenv("TWILIO_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
-TWILIO_FROM = os.getenv("TWILIO_FROM")
-TWILIO_TO = os.getenv("TWILIO_TO")
-
-MAX_BUDGET = 300000
-SNIPER_PRICE = 100000
+MAX_BUDGET = 500000      # Raised realistic business cap
+SNIPER_PRICE = 100000    # Ultra-deal alert
 
 DESTINATIONS = ["LIS", "OPO"]
 
-# === FIXED TRAVEL WINDOW ===
+# === FIXED JULY 2026 TRAVEL WINDOW ===
 BASE_DEPARTURE = datetime.date(2026, 7, 31)
 DEPARTURE_START = BASE_DEPARTURE - datetime.timedelta(days=2)
 DEPARTURE_END = BASE_DEPARTURE + datetime.timedelta(days=2)
@@ -80,8 +75,8 @@ def airline_link(airline, origin, dest, date):
 def send_email(results):
 
     if not results:
-        subject = "Flight Bot Update (No Deals)"
-        body = "No good deals found.\nBot running fine ✅"
+        subject = "Flight Bot Update"
+        body = "Flights scanned successfully.\nNo top deals today."
     else:
         subject = "🏆 TOP 5 Business Class Deals"
         body = "\n\n".join(results)
@@ -147,17 +142,20 @@ def search_flights(depart, ret, dest):
     try:
         r = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
         data = r.json()
-        print("Flights returned:", len(data.get("best_flights", [])))
+        flights = data.get("best_flights", [])
+        print("Flights returned:", len(flights))
     except Exception as e:
         print("API ERROR:", e)
         return []
 
     found = []
 
-    for f in data.get("best_flights", []):
+    for f in flights:
 
         price = f.get("price", 999999)
+        print("Price seen:", price)
 
+        # Soft price filter (no hard elimination unless extreme)
         if price > MAX_BUDGET:
             continue
 
@@ -169,7 +167,6 @@ def search_flights(depart, ret, dest):
 
         airline = outbound[0].get("airline", "Unknown")
 
-        # Soft airline penalty instead of rejection
         airline_penalty = 0
         if not any(a in airline for a in AIRLINES_ALLOWED):
             airline_penalty = 40
@@ -182,8 +179,8 @@ def search_flights(depart, ret, dest):
         miles_label, val = miles_value_check(price, dest)
 
         if price <= SNIPER_PRICE:
-            print("🚨 SNIPER TRIGGERED")
-        
+            print("🚨 SNIPER DEAL FOUND")
+
         link = airline_link(airline, "DEL", dest, depart)
 
         score = deal_score(price, total, val) + airline_penalty
